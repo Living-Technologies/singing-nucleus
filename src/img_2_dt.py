@@ -105,6 +105,7 @@ class ImageDtDataset(Dataset):
 
     """
     def __init__(self, img_path, mask_path):
+        print(img_path, mask_path)
         img_ms = ngff_zarr.from_ngff_zarr(img_path)
         img = img_ms.images[0].data
 
@@ -119,8 +120,7 @@ class ImageDtDataset(Dataset):
 
     def __getitem__(self, idx):
         x = numpy.array(self.images[idx], dtype="float32")
-        y = scipy.ndimage.distance_transform_edt( numpy.array(self.masks[idx], dtype="float32") ) + numpy.array( self.masks[idx], dtype="float32" )
-        #y = numpy.array( self.masks[idx], dtype="float32" )
+        y = numpy.array( scipy.ndimage.distance_transform_edt( self.masks[idx] ), dtype="float32")
         return x,y
 
 
@@ -171,7 +171,6 @@ class DaskDataset(Dataset):
         return self.da.shape[0]
     def __getitem__(self, idx):
         return numpy.array(self.da[idx], dtype="float32")
-from matplotlib import pyplot
 
 def predictDt( config, img_path ):
     model = ImageToDistanceTransform( config["filters"], config["depth"])
