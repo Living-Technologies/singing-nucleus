@@ -105,10 +105,11 @@ class ImageDtDataset(Dataset):
 
     """
     def __init__(self, img_path, mask_path):
-        multiscales = ngff_zarr.from_ngff_zarr(img_path)
-        img = multiscales.images[0].data
-        multiscales = ngff_zarr.from_ngff_zarr(img_path)
-        msk = multiscales.images[0].data
+        img_ms = ngff_zarr.from_ngff_zarr(img_path)
+        img = img_ms.images[0].data
+
+        msk_ms = ngff_zarr.from_ngff_zarr(mask_path)
+        msk = msk_ms.images[0].data
         self.masks = msk
         self.images = img
 
@@ -118,7 +119,8 @@ class ImageDtDataset(Dataset):
 
     def __getitem__(self, idx):
         x = numpy.array(self.images[idx], dtype="float32")
-        y = numpy.array(scipy.ndimage.distance_transform_edt( self.masks[idx]), dtype="float32")
+        y = scipy.ndimage.distance_transform_edt( numpy.array(self.masks[idx], dtype="float32") ) + numpy.array( self.masks[idx], dtype="float32" )
+        #y = numpy.array( self.masks[idx], dtype="float32" )
         return x,y
 
 
@@ -162,9 +164,38 @@ def trainModel( config ):
             logit.write("%s\t%s\n"%(i, l.item() ) )
         torch.save(model.state_dict(), config["model"])
 
+class DaskDataset(Dataset):
+    def __init__(self, da):
+        self.da = da
+    def __len__(self):
+        return self.da.shape[0]
+    def __getitem__(self, idx):
+        return numpy.array(self.da[idx], dtype="float32")
+from matplotlib import pyplot
 
-def predictDt( config ):
-    pass
+def predictDt( config, img_path ):
+    model = ImageToDistanceTransform( config["filters"], config["depth"])
+    if os.path.exists( config["model"] ):
+        model.load_state_dict(torch.load(config["model"], weights_only=True))
+    else:
+        print("No model weights exist at %s"%config["model"])
+        sys.exit(0)
+    multiscales = ngff_zarr.from_ngff_zarr(img_path)
+    meta = multiscales.images[0]
+    img = meta.data
+    bs = config["batch_size"]
+    ds = DaskDataset(img)
+    store = "testing.zarr"
+    dl = DataLoader( ds, batch_size=bs, shuffle=False );
+    out = numpy.zeros( (bs, *img.shape[1:]) )
+
+    for x in dl:
+        out[:] = model(x).detach()
+
+    oi = ngff_zarr.to_ngff_image(out, dims=meta.dims, translation=meta.translation, scale=meta.scale)
+    ms = ngff_zarr.to_multiscales( oi, scale_factors = 48 )
+    print(len(ms.images), "images created")
+    ngff_zarr.to_ngff_zarr( store, ms, overwrite=False )
 
 
 if __name__=="__main__":
@@ -172,5 +203,5 @@ if __name__=="__main__":
     if sys.argv[1] == 't':
         trainModel(config)
     elif sys.argv[1] == 'p':
-        predictDt(config)
+        predictDt(config, sys.argv[3])
 
