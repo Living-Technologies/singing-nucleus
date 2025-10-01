@@ -10,6 +10,8 @@ import ngff_zarr
 import scipy, numpy
 import sys, os, json
 
+import dask
+
 base_config = {
     "images" : "images.zarr",
     "masks" : "masks.zarr",
@@ -173,28 +175,61 @@ class DaskDataset(Dataset):
         return numpy.array(self.da[idx], dtype="float32")
 
 def predictDt( config, img_path ):
+    device = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
+    print(f"Using {device} device")
     model = ImageToDistanceTransform( config["filters"], config["depth"])
     if os.path.exists( config["model"] ):
         model.load_state_dict(torch.load(config["model"], weights_only=True))
     else:
         print("No model weights exist at %s"%config["model"])
         sys.exit(0)
+    model.to(device)
+
     multiscales = ngff_zarr.from_ngff_zarr(img_path)
     meta = multiscales.images[0]
     img = meta.data
-    bs = config["batch_size"]
-    ds = DaskDataset(img)
+
+    bs = 4
+    n = img.shape[0]
+    last = n%bs
+    head = (bs, )*(n//bs)
     store = "testing.zarr"
-    dl = DataLoader( ds, batch_size=bs, shuffle=False );
-    out = numpy.zeros( (bs, *img.shape[1:]) )
 
-    for x in dl:
-        out[:] = model(x).detach()
+    stacks = []
+    def torchit( block_id, model=model, img=img, bs=bs ):
+        idx = block_id[0]
+        low = idx*bs
+        high = low + bs
+        x = torch.tensor( numpy.array(img[low:high], dtype="float32") , device=device )
+        return model(x).detach().cpu()
 
+    sample = img[0]
+    print("preparing")
+    out = dask.array.map_blocks( torchit, dtype=sample.dtype, chunks = ((*head, last), *sample.shape) )
+    print( "out stack: ", out.shape )
     oi = ngff_zarr.to_ngff_image(out, dims=meta.dims, translation=meta.translation, scale=meta.scale)
-    ms = ngff_zarr.to_multiscales( oi, scale_factors = 48 )
-    print(len(ms.images), "images created")
+    ms = ngff_zarr.to_multiscales( oi, cache=False, chunks=(1, 1, 48, 48, 48) )
+    print("writing")
     ngff_zarr.to_ngff_zarr( store, ms, overwrite=False )
+
+def validateConfig( config ):
+    from matplotlib import pyplot
+    dataset = ImageDtDataset( config["images"], config["masks"] )
+    loader = DataLoader(dataset, batch_size=config["batch_size"], shuffle = False)
+
+    model = ImageToDistanceTransform( config["filters"], config["depth"])
+    if os.path.exists( config["model"] ):
+        model.load_state_dict(torch.load(config["model"], weights_only=True))
+
+
+    for x, y in loader:
+        line = y[0, 0, 24, 24].detach()
+        pyplot.plot(line)
+        z = model(x)
+        line2 = z[0, 0, 24, 24].detach()
+        pyplot.plot(line2)
+        pyplot.show()
+        print("max loaded vs predicted", torch.max(y).item(), torch.max(z).item() )
 
 
 if __name__=="__main__":
@@ -203,4 +238,7 @@ if __name__=="__main__":
         trainModel(config)
     elif sys.argv[1] == 'p':
         predictDt(config, sys.argv[3])
+    elif sys.argv[1] == 'v':
+        validateConfig( config )
+
 
