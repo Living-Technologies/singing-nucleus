@@ -179,7 +179,7 @@ def predictDt( config, img_path ):
     print(f"Using {device} device")
     model = ImageToDistanceTransform( config["filters"], config["depth"])
     if os.path.exists( config["model"] ):
-        model.load_state_dict(torch.load(config["model"], weights_only=True))
+        model.load_state_dict(torch.load(config["model"], weights_only=True, map_location=device))
     else:
         print("No model weights exist at %s"%config["model"])
         sys.exit(0)
@@ -201,11 +201,12 @@ def predictDt( config, img_path ):
         low = idx*bs
         high = low + bs
         x = torch.tensor( numpy.array(img[low:high], dtype="float32") , device=device )
-        return model(x).detach().cpu()
+        y = model(x).clip(0, 127).detach().to( torch.int8).cpu()
+        return y
 
     sample = img[0]
     print("preparing")
-    out = dask.array.map_blocks( torchit, dtype=sample.dtype, chunks = ((*head, last), *sample.shape) )
+    out = dask.array.map_blocks( torchit, dtype="int8", chunks = ((*head, last), *sample.shape) )
     print( "out stack: ", out.shape )
     oi = ngff_zarr.to_ngff_image(out, dims=meta.dims, translation=meta.translation, scale=meta.scale)
     ms = ngff_zarr.to_multiscales( oi, cache=False, chunks=(1, 1, 48, 48, 48) )
