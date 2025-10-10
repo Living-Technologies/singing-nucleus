@@ -167,19 +167,22 @@ def trainModel( config ):
             logit.write("%s\t%s\n"%(i, l.item() ) )
         torch.save(model.state_dict(), config["model"])
 
-def predictMeshes( config ):
+def predictMeshes( config, image ):
+    device = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
+    print(f"Using {device} device")
     transformer = loadModel(config)
-    transformer.load_state_dict(torch.load(config["model"], weights_only=True))
+    transformer.load_state_dict(torch.load(config["model"], weights_only=True, map_location=device))
     images = config["images"]
     meshes = config["meshes"]
     dataset = ImageMeshDataset(images, meshes)
     topo = dataset.topo
-    loader = DataLoader(dataset, batch_size=64, shuffle = False)
     track = bmf.Track("predicted")
-
+    multiscales = ngff_zarr.from_ngff_zarr(image)
+    top = multiscales.images[0].data
+    
     dex = 0
-    for i, (X, y) in enumerate(loader):
-        z = transformer(X)
+    for i, x in enumerate(top):
+        z = transformer(torch.clamp( torch.tensor(numpy.expand_dims( numpy.array(x, dtype="float32"), 0)), 0, 1) )
         for row in z:
             mesh = bmf.Mesh(row.detach(), topo["connections"], topo["triangles"])
             track.addMesh( dex, mesh)
@@ -201,6 +204,6 @@ if __name__=="__main__":
     if sys.argv[1] == 't':
         trainModel(config)
     elif sys.argv[1] == 'p':
-        predictMeshes(config)
+        predictMeshes(config, sys.argv[3])
     elif sys.argv[1]=='e':
         saveMeshes(config)
