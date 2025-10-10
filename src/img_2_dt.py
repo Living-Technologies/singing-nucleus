@@ -208,8 +208,24 @@ def validateConfig( config ):
         pyplot.show()
         print("max loaded vs predicted", torch.max(y).item(), torch.max(z).item() )
 
+def createModelConfig(config, config_path, img_path, mask_path):
+    print(config_path)
+    config["images"] = img_path
+    config["masks"] = mask_path
+    if os.path.exists(img_path):
+        print("images found: ", img_path)
+    if os.path.exists(mask_path):
+        print("masks found: ", mask_path)
+    config["model"] = config_path.replace(".json", ".pth")
+    with open(config_path, 'w') as f:
+        json.dump( config, f, indent = 1 )
 
+        
 if __name__=="__main__":
+    commands =  ['t', 'p', 'v', 'c'] 
+    if not sys.argv[1] in commands:
+        print("Choose a command!", commands)
+        sys.exit(1)
     config = getConfig(sys.argv[2], base_config)
     if sys.argv[1] == 't':
         trainModel(config)
@@ -217,5 +233,13 @@ if __name__=="__main__":
         predictDt(config, sys.argv[3])
     elif sys.argv[1] == 'v':
         validateConfig( config )
+    elif sys.argv[1] =='c':
+        try:
+            createModelConfig(config, sys.argv[2], sys.argv[3], sys.argv[4])
+            print("successfuly saved config", sys.argv[2])            
+        except:
+            print("usage: img_2_dt c config.json image_path mask_path")
+            for item in sys.exc_info():
+                print(item)
 
 

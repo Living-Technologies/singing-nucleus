@@ -30,7 +30,7 @@ base_config = {
             "filters" : 16,
             "max_pools": 3
         },
-    "batch_size" : 128
+    "batch_size" : 16
     }
 
 class ImageToMeshTransformer(nn.Module):
@@ -90,8 +90,33 @@ def train(config):
             logit.write("%s\t%s\n"%(i, l.item() ) )
         torch.save(model.state_dict(), config["model"])
 
+def createModel( config, config_path, dt_config, mesh_config):
+    
+    with open(dt_config, 'r') as fp:
+            dtcfg = json.load(fp)
+            to_update = config["dt_model"]
+            for key in to_update:
+                to_update[key] = dtcfg[key]
+    with open(mesh_config, 'r') as fp:
+            meshcfg = json.load(fp)
+            to_update = config["mesh_model"]
+            for key in to_update:
+                to_update[key] = meshcfg[key]
+    config["images"] = dtcfg["images"]
+    config["meshes"] = meshcfg["meshes"]
+    json.dump( config, open(config_path, 'w'), indent = 1 )
+
+    
 if __name__ == "__main__":
     print("running")
     config = getConfig( sys.argv[2], base_config )
+    
     if sys.argv[1] == 't':
         train(config)
+    elif sys.argv[1] == 'c':
+        try:
+            createModel( config, sys.argv[2], sys.argv[3], sys.argv[4] )    
+        except:
+            print("usage: img_2_mesh c config.json dt_config.json mesh_config.json")
+            print(sys.exc_info())
+        
