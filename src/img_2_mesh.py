@@ -8,7 +8,7 @@ import ngff_zarr
 import numpy
 import struct
 import sys, json, math, os, pathlib
-
+import binarymeshformat as bmf
 
 
 from bin_2_mesh import BinaryToMeshTransformer, ImageMeshDataset
@@ -60,12 +60,7 @@ def trainStep(dataloader, model, loss_fn, optimizer, device):
         optimizer.step()
         optimizer.zero_grad()
     return acc/n
-
-def train(config):
-    device = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
-    print(f"Using {device} device")
-
-    dataset = ImageMeshDataset(config["images"], config["meshes"])
+def loadModel( config, device=None ):
     unet = config["dt_model"]
     img2Dt = ImageToDistanceTransform( unet["filters"], unet["depth"] )
     mconf = config["mesh_model"]
@@ -78,7 +73,14 @@ def train(config):
         model.imgToDt.load_state_dict(torch.load(unet["model"], weights_only=True, map_location=device))
         model.binToMesh.load_state_dict(torch.load(mconf["model"], weights_only=True, map_location=device))
     print("loaded and training!")
+    return model
+    
+def train(config):
+    device = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
+    print(f"Using {device} device")
 
+    dataset = ImageMeshDataset(config["images"], config["meshes"])
+    model = loadModel( config )
     loader = DataLoader(dataset, batch_size=config["batch_size"], shuffle = True)
     logname = config["model"].replace(".pth", "")
     optimizer = torch.optim.Adam(model.parameters(), lr = 0.00001)
@@ -106,6 +108,45 @@ def createModel( config, config_path, dt_config, mesh_config):
     config["meshes"] = meshcfg["meshes"]
     json.dump( config, open(config_path, 'w'), indent = 1 )
 
+def loadTopology( quickmesh_path ):
+    with open(quickmesh_path, 'rb') as opend:
+        n = opend.read(4)
+        n_indexes = struct.unpack_from(">i", n, 0)[0]
+        n_bytes = n_indexes*4
+        tindexes = struct.unpack_from(">%si"%n_indexes, opend.read(n_bytes), 0)
+
+        n = opend.read(4)
+        n_indexes = struct.unpack_from(">i", n, 0)[0]
+        n_bytes = n_indexes*4
+        cindexes = struct.unpack_from(">%si"%n_indexes, opend.read(n_bytes), 0)
+    return {"triangles" : tindexes,"connections":cindexes}
+    
+def predict( config, config_path, image_path, output=None):
+    if output is None:
+        output = image_path.replace(".zarr", "-pred.zarr")
+        
+    device = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
+    print(f"Using {device} device")
+    transformer = loadModel(config, device)
+
+    images = config["images"]
+    meshes = config["meshes"]
+
+    #dataset = ImageMeshDataset(images, meshes)
+    topo = loadTopology( meshes )
+    track = bmf.Track("predicted")
+    multiscales = ngff_zarr.from_ngff_zarr(image_path)
+    top = multiscales.images[0].data
+    
+    dex = 0
+    for i, x in enumerate(top):
+        z = transformer(torch.tensor(numpy.expand_dims( numpy.array(x, dtype="float32"), 0)))
+        for row in z:
+            mesh = bmf.Mesh(row.detach(), topo["connections"], topo["triangles"])
+            track.addMesh( dex, mesh)
+            dex += 1
+    bmf_name = "dev-%s.bmf"%config["model"].replace(".pth", "")
+    bmf.saveMeshTracks( [track], bmf_name)
     
 if __name__ == "__main__":
     print("running")
@@ -119,4 +160,9 @@ if __name__ == "__main__":
         except:
             print("usage: img_2_mesh c config.json dt_config.json mesh_config.json")
             print(sys.exc_info())
-        
+    elif sys.argv[1] == 'p':
+        try:
+            predict( config, sys.argv[2], sys.argv[3], output=None)
+        except:
+            print("usage: img_2_mesh p config.json sample.zarr")
+            print(sys.exc_info())
