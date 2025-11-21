@@ -145,7 +145,8 @@ def trainModel( config ):
     limit = None
     if "epoch_limit" in config:
         limit = config["epoch_limit"]
-
+    
+    print("epoch limit set to:", limit)
     for i in range(1000):
         l = train(loader, model, loss_fn, optimizer, device, limit = limit)
         with open("log-%s.txt"%logname, 'a') as logit:
