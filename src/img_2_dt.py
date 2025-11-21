@@ -102,13 +102,20 @@ class ImageDtDataset(Dataset):
         return x,y
 
 
-def train(dataloader, model, loss_fn, optimizer, device):
+def train(dataloader, model, loss_fn, optimizer, device, limit=100):
     size = len(dataloader.dataset)
     model.to(device)
     model.train()
     acc = 0.0
     n = 0
+
+    if not limit > 0:
+        limit = size
+    count = 0
     for batch, (X, y) in enumerate(dataloader):
+        if count >= limit:
+            break
+        count +=  1
         X = X.to(device)
         y = y.to(device)
         # Compute prediction error
@@ -135,9 +142,12 @@ def trainModel( config ):
     logname = config["model"].replace(".pth", "")
     optimizer = torch.optim.Adam(model.parameters(), lr = 0.00001)
     loss_fn = nn.MSELoss()
+    limit = None
+    if "epoch_limit" in config:
+        limit = config["epoch_limit"]
 
     for i in range(1000):
-        l = train(loader, model, loss_fn, optimizer, device)
+        l = train(loader, model, loss_fn, optimizer, device, limit = limit)
         with open("log-%s.txt"%logname, 'a') as logit:
             logit.write("%s\t%s\n"%(i, l.item() ) )
         torch.save(model.state_dict(), config["model"])
