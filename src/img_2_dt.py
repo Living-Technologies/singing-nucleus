@@ -195,7 +195,7 @@ def predictDt( config, img_path ):
     out = dask.array.map_blocks( torchit, dtype="int8", chunks = ((*head, last), *sample.shape) )
     print( "out stack: ", out.shape )
     oi = ngff_zarr.to_ngff_image(out, dims=meta.dims, translation=meta.translation, scale=meta.scale)
-    ms = ngff_zarr.to_multiscales( oi, cache=False, chunks=(1, 1, 48, 48, 48) )
+    ms = ngff_zarr.to_multiscales( oi, cache=False, chunks=(1, 1, *out.shape[2:]) )
     print("writing")
     ngff_zarr.to_ngff_zarr( store, ms, overwrite=False )
 
