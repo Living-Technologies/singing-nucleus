@@ -28,7 +28,8 @@ base_config = {
             "model" : "dev-model.pth",
             "latent_size" : 64,
             "filters" : 16,
-            "max_pools": 3
+            "max_pools": 3,
+            "length" : 48
         },
     "batch_size" : 16
     }

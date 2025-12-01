@@ -9,7 +9,7 @@ import numpy
 import struct
 import sys, json, math, os
 
-from singing_nucleus import SkipLayer
+from singing_nucleus import SkipLayer, getConfig
 
 import binarymeshformat as bmf
 
@@ -31,7 +31,8 @@ base_config = {
     "filters" : 16,
     "max_pools": 3,
     "batch_size" : 128,
-    "dt" : True
+    "dt" : True,
+    "length" : 48
     }
 
 
@@ -40,7 +41,7 @@ class BinaryToMeshTransformer(nn.Module):
     """
         The model used for creating meshes.
     """
-    def __init__(self, latent_size, filters, max_pools):
+    def __init__(self, latent_size, filters, max_pools, length):
         super().__init__()
         layers = []
         n = filters
@@ -53,7 +54,7 @@ class BinaryToMeshTransformer(nn.Module):
                 layers.append( nn.MaxPool3d(2) )
         layers.append( SkipLayer(current, 2) )
         layers.append( nn.Flatten() )
-        length = 48//2**max_pools
+        length = length//2**max_pools
         total = length**3*2
         layers.append( nn.Linear( total, latent_size ) )
         layers.append( nn.ReLU() )
@@ -64,7 +65,7 @@ class BinaryToMeshTransformer(nn.Module):
         return self.encoder(x)
 
 def loadModel( config ):
-    return BinaryToMeshTransformer( config["latent_size"], config["filters"], config["max_pools"] )
+    return BinaryToMeshTransformer( config["latent_size"], config["filters"], config["max_pools"], config["length"] )
 
 def loadMeshFile( mesh_file, limit=-1 ):
     with open(mesh_file, 'rb') as opend:
