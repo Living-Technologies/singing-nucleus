@@ -7,7 +7,7 @@ from torch.utils.data import Dataset, DataLoader
 import ngff_zarr
 import numpy
 import struct
-import sys, json, math, os
+import sys, json, math, os, pathlib
 
 from singing_nucleus import SkipLayer, getConfig
 
@@ -24,8 +24,8 @@ the mesh.
 """
 
 base_config = {
-    "images" : "masks.zarr",
-    "meshes" : "qm_mesh-masks.dat",
+    "images" : ["masks.zarr"],
+    "meshes" : ["qm_mesh-masks.dat"],
     "model" : "dev-model.pth",
     "latent_size" : 64,
     "filters" : 16,
@@ -125,6 +125,35 @@ class ImageMeshDataset(Dataset):
     def __getitem__(self, idx):
         return numpy.array(self.images[idx], dtype="float32"), numpy.array(self.meshes[idx], dtype="float32")
 
+class MultiImageMeshDataset(Dataset):
+    def __init__(self, img_paths, mesh_paths):
+        self.lengths = []
+        self.meshes = []
+        self.images = []
+        for img_path, mesh_path in zip(img_paths, mesh_paths):
+
+            indexes, meshes = loadMeshFile(mesh_path)
+            multiscales = ngff_zarr.from_ngff_zarr(img_path)
+            top = multiscales.images[0].data
+            print(meshes.shape, top.shape, img_path)
+            self.meshes.append( meshes )
+            self.images.append( top[:meshes.shape[0]] )
+            self.topo = indexes
+            self.lengths.append(meshes.shape[0])
+
+    def __len__(self):
+        return sum(self.lengths)
+
+    def __getitem__(self, idx):
+        img_dex = 0
+        rdex = idx
+        while rdex >= self.lengths[img_dex]:
+            rdex = rdex - self.lengths[img_dex]
+            img_dex += 1
+
+        return numpy.array(self.images[img_dex][rdex], dtype="float32"), numpy.array(self.meshes[img_dex][rdex], dtype="float32")
+
+
 def train(dataloader, model, loss_fn, optimizer, device):
     size = len(dataloader.dataset)
     model.train()
@@ -151,7 +180,10 @@ def trainModel( config ):
     print(f"Using {device} device")
     images = config["images"]
     meshes = config["meshes"]
-    dataset = ImageMeshDataset(images, meshes)
+    if isinstance(images, list):
+        dataset = MultiImageMeshDataset(images, meshes)
+    else:
+        dataset = ImageMeshDataset(images, meshes)
     loader = DataLoader(dataset, batch_size=config["batch_size"], shuffle = True)
     transformer = loadModel(config)
     
@@ -160,7 +192,7 @@ def trainModel( config ):
 
     model  = transformer.to(device)
     loss_fn = nn.MSELoss()
-    optimizer = torch.optim.Adam(transformer.parameters(), lr = 0.001)
+    optimizer = torch.optim.Adam(transformer.parameters(), lr = 0.0001)
     logname = config["model"].replace(".pth", "")
     for i in range(1000):
         l = train(loader, model, loss_fn, optimizer, device)
@@ -175,7 +207,8 @@ def predictMeshes( config, image ):
     transformer.load_state_dict(torch.load(config["model"], weights_only=True, map_location=device))
     images = config["images"]
     meshes = config["meshes"]
-    dataset = ImageMeshDataset(images, meshes)
+
+    dataset = ImageMeshDataset(images[0], meshes[0])
     topo = dataset.topo
     track = bmf.Track("predicted")
     multiscales = ngff_zarr.from_ngff_zarr(image)
@@ -193,12 +226,15 @@ def predictMeshes( config, image ):
 
 def saveMeshes(config):
     n = 64;
-    topo, positions = loadMeshFile(config["meshes"], limit=n)
-    track = bmf.Track("truth")
-    for i in range(n):
-        mesh = bmf.Mesh(positions[i], topo["connections"], topo["triangles"])
-        track.addMesh( i, mesh)
-    bmf.saveMeshTracks([track], "dev-truth.bmf")
+    for mesh_file in config["meshes"]:
+        mesh_path = pathlib.Path(mesh_file)
+        print("processing", mesh_path.parent.stem)
+        topo, positions = loadMeshFile(mesh_file, limit=n)
+        track = bmf.Track("truth")
+        for i in range(n):
+            mesh = bmf.Mesh(positions[i], topo["connections"], topo["triangles"])
+            track.addMesh( i, mesh)
+        bmf.saveMeshTracks([track], "dev-%s.bmf"%mesh_path.parent.stem )
 
 if __name__=="__main__":
     config = getConfig(sys.argv[2], base_config)
