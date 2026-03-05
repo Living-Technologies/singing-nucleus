@@ -16,7 +16,6 @@ import time
 import skimage
 
 import dask.array as da
-from dask.distributed import Lock, Client
 
 from singing_nucleus import getConfig, SkipLayer
 
@@ -130,6 +129,45 @@ class ImageDtDataset(Dataset):
         y, z = dt( self.masks[sdex][dex] )
         return x, y, z
 
+def daskTrainingLoop(dataset, model, loss_fn, optimizer, device):
+    n = len(dataset)
+    batch_size = 4
+
+    total_batches = n//batch_size
+
+    last = 0
+    if n%batch_size > 0:
+        last += 1
+
+    batches = n//batch_size + last
+    out = numpy.zeros((batches, 3))
+    bs = batch_size
+    for i in range(batches):
+        idx = i
+        low = idx*bs
+        high = low + bs
+        elements = bs
+        if high > dataset.images.shape[0]:
+            high = dataset.images.shape[0]
+            elements = high - low
+
+        x = torch.tensor( numpy.array(dataset.images[low:high], dtype="float32") , device=device )
+        t = [ getDt(dataset.masks[low + i]) for i in range(elements) ]
+        dt = torch.tensor( numpy.array([i[0] for i in t ]), device = device )
+        matrix = torch.tensor( numpy.array([i[1] for i in t]) , device = device )
+
+        y, z = model(x)
+        dt_loss, mat_loss = loss_fn(y, dt, z, matrix)
+        loss = dt_loss + mat_loss * 0.00001
+        loss.backward()
+        optimizer.step()
+        optimizer.zero_grad()
+
+        out[i][0] += loss.item()
+        out[i][1] += dt_loss.item()
+        out[i][2] += mat_loss.item()
+
+    return numpy.mean(out, axis=0)
 
 def train(dataloader, model, loss_fn, optimizer, device):
     size = len(dataloader.dataset)
@@ -199,25 +237,23 @@ def trainModel( config ):
         print("epoch limit set to:", limit)
         dataset.setLimit(limit)
 
-    loader = DataLoader(dataset, batch_size=config["batch_size"],num_workers = 4, prefetch_factor=8)
+    #loader = DataLoader(dataset, batch_size=config["batch_size"],num_workers = 4, prefetch_factor=8)
     logname = config["model"].replace(".pth", "")
     optimizer = torch.optim.Adam(model.parameters(), lr = 0.00001)
     #loss_fn = nn.MSELoss()
     loss_fn = clipped_mse
     #loss_fn = PairedLossFunction()
+
     model.to(device)
     model.train()
 
-    #client = Client()
-
-
     for i in range(1000):
         start = time.time();
-        l = train(loader, model, loss_fn, optimizer, device)
-        #l = daskTrainingLoop(dataset, model, loss_fn, optimizer, device)
+        #l = train(loader, model, loss_fn, optimizer, device)
+        l = daskTrainingLoop(dataset, model, loss_fn, optimizer, device)
         print("trained: ", (time.time() - start))
         with open("log-%s.txt"%logname, 'a') as logit:
-            logit.write("%s\t%s\t%s\n"%(i, l[0], l[1] ) )
+            logit.write("%s\t%s\t%s\t%s\n"%(i, l[0], l[1], l[2] ) )
         start = time.time();
         torch.save(model.state_dict(), config["model"])
         print("saved: ", (time.time() - start))
@@ -279,52 +315,7 @@ class DaskingDataset():
         self.n = limit
 
 
-def daskTrainingLoop(dataset, model, loss_fn, optimizer, device):
-    n = len(dataset)
-    batch_size = 16
 
-    total_batches = n//batch_size
-
-    last = 0
-    if n%batch_size > 0:
-        last += 1
-
-    batches = n//batch_size + last
-    lock = Lock()
-
-    def torchit( block_id, model=model, dataset = dataset, bs = batch_size, device=device, lock = lock ):
-        idx = block_id[0]
-        low = idx*bs
-        high = low + bs
-        elements = bs
-        if high > dataset.images.shape[0]:
-            high = dataset.images.shape[0]
-            elements = high - low
-
-        x = torch.tensor( numpy.array(dataset.images[low:high], dtype="float32") , device=device )
-        t = [ getDt(dataset.masks[low + i]) for i in range(elements) ]
-        dt = torch.tensor( numpy.array([i[0] for i in t ]), device = device )
-        matrix = torch.tensor( numpy.array([i[1] for i in t]) , device = device )
-
-
-        y, z = model(x)
-
-        dt_loss, mat_loss = loss_fn(y, dt, z, matrix)
-
-        loss = dt_loss + mat_loss * 0.00001
-        lock.acquire()
-        loss.backward()
-        optimizer.step()
-        optimizer.zero_grad()
-        ret = numpy.array([ [loss.cpu().detach().numpy(), dt_loss.cpu().detach().numpy(), mat_loss.cpu().detach().numpy()]] )
-        lock.release()
-        return ret
-
-    chunks = ( (1, ) * batches, 3 )
-
-    out = dask.array.map_blocks( torchit, dtype="float32", chunks = chunks )
-    total = out.mean(axis=0)
-    return total.compute()
 
 def daskEvaluateModel(config):
     device = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
