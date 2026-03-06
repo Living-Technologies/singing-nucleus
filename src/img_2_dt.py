@@ -209,30 +209,6 @@ def epoch(dataset, model, loss_fn, optimizer):
 
     return out/batches
 
-def train(dataloader, model, loss_fn, optimizer, device):
-    size = len(dataloader.dataset)
-    acc = [0.0, 0.0]
-    n = 0
-    for batch, (X, y, z) in enumerate(dataloader):
-        X = X.to(device)
-        y = y.to(device)
-        z = z.to(device)
-
-        # Compute prediction error
-        pred, mat = model(X)
-        dt_loss, mat_loss = loss_fn(pred, y, mat, z)
-
-        loss = dt_loss + mat_loss * 0.00001
-        acc[0] += dt_loss.item()
-        acc[1] += mat_loss.item()
-        n += 1
-
-        # Backpropagation
-        loss.backward()
-        optimizer.step()
-        optimizer.zero_grad()
-    return [ a/n for a in acc]
-
 def clipped_mse(pred, truth, pred_mat, mat):
     vol = torch.sum( (truth > 0 )*1.0, (-3, -2, -1), keepdims=True)
     clip = ( vol>7 ) * 1.0
@@ -272,7 +248,6 @@ class DeviceLoader:
 def trainModel( config ):
     device = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
     print(f"Using {device} device")
-    torch.multiprocessing.set_sharing_strategy('file_system')
     model = ImageToDistanceTransform( config["filters"], config["depth"])
     if os.path.exists( config["model"] ):
         model.load_state_dict(torch.load(config["model"], weights_only=True), strict=False)
@@ -318,12 +293,12 @@ def evaluateModel(config):
         model.load_state_dict(torch.load(config["model"], weights_only=True), strict=False)
     else:
         print("cannot find existing model: ", config["model"])
+
+
     dataset = DaskingDataset( config["images"], config["masks"] )
     total = len(dataset)
-
     batch_size = 1
-    use_torch_dataloader = True
-
+    use_torch_dataloader = False
     if use_torch_dataloader:
         loader = DataLoader(dataset, batch_size=1, shuffle = False, num_workers = 4, prefetch_factor = 8)
         loader = DeviceLoader(loader, device)
