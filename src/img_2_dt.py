@@ -270,7 +270,8 @@ def trainModel( config ):
     use_torch_dataload = True
 
     if use_torch_dataload:
-        loader = DataLoader(dataset, batch_size=config["batch_size"],num_workers = 4, prefetch_factor=8)
+        pin_memory = device != "mps"
+        loader = DataLoader(dataset, batch_size=config["batch_size"],num_workers = 4, prefetch_factor=8, pin_memory=pin_memory)
         loader = DeviceLoader(loader, device)
     else:
         loader = QueueLoader(dataset, config["batch_size"], device)
