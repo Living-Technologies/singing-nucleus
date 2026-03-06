@@ -16,6 +16,9 @@ import time
 import skimage
 
 import dask.array as da
+import concurrent.futures
+
+import random
 
 from singing_nucleus import getConfig, SkipLayer
 
@@ -92,7 +95,59 @@ def getDt(img):
     evs = evs.reshape((9, ))
     return ( numpy.array(scipy.ndimage.distance_transform_edt( msk ), dtype="float32"), evs )
 
-class ImageDtDataset(Dataset):
+
+class QueueLoader:
+    def __init__(self, dataset, batch_size, device, parallel = 4):
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.device = device
+        self.n = len(self.dataset)
+        if self.n % batch_size == 0:
+            self.batches = self.n//self.batch_size
+        else:
+            self.batches = self.n//self.batch_size + 1
+        self.parallel = parallel
+
+    def runMe(self, b):
+        idx = b
+        low = idx * self.batch_size
+        high = low + self.batch_size
+        elements = self.batch_size
+
+        if high > self.n:
+            high = self.n
+            elements = high - low
+
+        images = self.dataset[low:high]
+
+        x = torch.tensor( images[0], device = self.device )
+        dt = torch.tensor( images[1], device = self.device )
+        matrix = torch.tensor( images[2], device = self.device )
+
+        return (x, dt, matrix)
+
+    def __iter__(self):
+        ex = concurrent.futures.ThreadPoolExecutor()
+
+        jobs = [(self.runMe, i) for i in range(self.batches)]
+        L = []
+        for i in range(self.parallel):
+            job = jobs.pop(0)
+            L.append( ex.submit(*job) )
+            if len(jobs)==0:
+                break
+        out = numpy.zeros((3, ))
+        while len(L) > 0:
+            future = L.pop(0)
+            ret = future.result()
+            if len(jobs) > 0:
+                job = jobs.pop(0)
+                L.append(ex.submit(*job))
+
+            yield ret
+        ex.shutdown()
+
+class DaskingDataset():
     """
         The images are crops saved as zarr files. The meshes are a
     binary file.
@@ -103,7 +158,6 @@ class ImageDtDataset(Dataset):
         print(len(img_paths), "images", len(mask_paths), "masks")
         self.masks = []
         self.images = []
-        self.lengths = []
         for img_path, mask_path in zip(img_paths, mask_paths):
             img_ms = ngff_zarr.from_ngff_zarr(img_path)
             img = img_ms.images[0].data
@@ -112,62 +166,48 @@ class ImageDtDataset(Dataset):
             msk = msk_ms.images[0].data
             self.masks.append(msk)
             self.images.append(img)
-            self.lengths.append(img.shape[0])
-
+        self.images = da.concatenate(self.images, axis=0)
+        self.masks = da.concatenate(self.masks, axis=0)
+        self.n = self.images.shape[0]
+        self.indexes = [i for i in range(self.n)]
     def __len__(self):
-        return sum(self.lengths)
-
-    def __getitem__(self, idx):
-        sdex = 0
-        dex = idx
-        while dex >= self.lengths[sdex]:
-            dex = dex - self.lengths[sdex]
-            sdex += 1
-
-
-        x = numpy.array(self.images[sdex][dex], dtype="float32")
-        y, z = dt( self.masks[sdex][dex] )
+        return self.n
+    def __getitem__(self, i):
+        idx = self.indexes[i]
+        if not isinstance(idx, list):
+            x = numpy.array(self.images[idx, ...], dtype="float32")
+            mask_set = self.masks[idx, ...]
+            y, z = getDt(mask_set)
+        else:
+            x = numpy.array(self.images[idx, ...], dtype="float32")
+            mask_set = self.masks[idx, ...]
+            dt_mat = [getDt(mask) for mask in mask_set ]
+            y = numpy.array([row[0] for row in dt_mat ])
+            z = numpy.array([row[1] for row in dt_mat ])
         return x, y, z
 
-def daskTrainingLoop(dataset, model, loss_fn, optimizer, device):
-    n = len(dataset)
-    batch_size = 4
+    def shuffle(self):
+        random.shuffle(self.indexes)
+    def setLimit(self, limit):
+        self.n = limit
 
-    total_batches = n//batch_size
-
-    last = 0
-    if n%batch_size > 0:
-        last += 1
-
-    batches = n//batch_size + last
-    out = numpy.zeros((batches, 3))
-    bs = batch_size
-    for i in range(batches):
-        idx = i
-        low = idx*bs
-        high = low + bs
-        elements = bs
-        if high > dataset.images.shape[0]:
-            high = dataset.images.shape[0]
-            elements = high - low
-
-        x = torch.tensor( numpy.array(dataset.images[low:high], dtype="float32") , device=device )
-        t = [ getDt(dataset.masks[low + i]) for i in range(elements) ]
-        dt = torch.tensor( numpy.array([i[0] for i in t ]), device = device )
-        matrix = torch.tensor( numpy.array([i[1] for i in t]) , device = device )
-
+def epoch(dataset, model, loss_fn, optimizer):
+    out = numpy.zeros((3, ), dtype=float)
+    batches = 0
+    for x, dt, matrix in dataset:
         y, z = model(x)
         dt_loss, mat_loss = loss_fn(y, dt, z, matrix)
-        loss = dt_loss + mat_loss * 0.00001
+        loss = dt_loss + mat_loss
         loss.backward()
         optimizer.step()
         optimizer.zero_grad()
 
-        out[i][0] += loss.item()
-        out[i][1] += dt_loss.item()
-        out[i][2] += mat_loss.item()
+        out[0] += loss.item()
+        out[1] += dt_loss.item()
+        out[2] += mat_loss.item()
+        batches += 1
 
-    return numpy.mean(out, axis=0)
+    return out/batches
 
 def train(dataloader, model, loss_fn, optimizer, device):
     size = len(dataloader.dataset)
@@ -221,6 +261,14 @@ class PairedLossFunction:
     def __call__(self, pred, truth, pred_mat, mat):
         return self.mse(pred, truth), self.mse(pred_mat, mat)
 
+class DeviceLoader:
+    def __init__(self, loader, device):
+        self.loader = loader
+        self.device = device
+    def __iter__(self, ):
+        for item in self.loader:
+            yield tuple( i.to(self.device) for i in item )
+
 def trainModel( config ):
     device = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
     print(f"Using {device} device")
@@ -232,25 +280,28 @@ def trainModel( config ):
 
 
     dataset = DaskingDataset( config["images"], config["masks"] )
+
     if "epoch_limit" in config:
         limit = config["epoch_limit"]
         print("epoch limit set to:", limit)
         dataset.setLimit(limit)
 
-    #loader = DataLoader(dataset, batch_size=config["batch_size"],num_workers = 4, prefetch_factor=8)
-    logname = config["model"].replace(".pth", "")
-    optimizer = torch.optim.Adam(model.parameters(), lr = 0.00001)
-    #loss_fn = nn.MSELoss()
-    loss_fn = clipped_mse
-    #loss_fn = PairedLossFunction()
-
     model.to(device)
     model.train()
+    loss_fn = clipped_mse
+    logname = config["model"].replace(".pth", "")
+    optimizer = torch.optim.Adam(model.parameters(), lr = 0.00001)
 
+    use_torch_dataload = True
+
+    if use_torch_dataload:
+        loader = DataLoader(dataset, batch_size=config["batch_size"],num_workers = 4, prefetch_factor=8)
+        loader = DeviceLoader(loader, device)
+    else:
+        loader = QueueLoader(dataset, config["batch_size"], device)
     for i in range(1000):
         start = time.time();
-        #l = train(loader, model, loss_fn, optimizer, device)
-        l = daskTrainingLoop(dataset, model, loss_fn, optimizer, device)
+        l = epoch(loader, model, loss_fn, optimizer)
         print("trained: ", (time.time() - start))
         with open("log-%s.txt"%logname, 'a') as logit:
             logit.write("%s\t%s\t%s\t%s\n"%(i, l[0], l[1], l[2] ) )
@@ -258,140 +309,6 @@ def trainModel( config ):
         torch.save(model.state_dict(), config["model"])
         print("saved: ", (time.time() - start))
 
-class CustomLoader():
-    def __init__(self, dataset, device, batch_size=1):
-        self.dataset = dataset
-        self.n = len(dataset)//batch_size
-        self.batch_size = batch_size
-        self.device = device
-    def __len__(self):
-        return self.n
-    def __getitem__(self, idx):
-        batchx = []
-        batchy = []
-        batchz = []
-        low = idx*self.batch_size
-
-        for i in range(self.batch_size):
-            x, y, z = self.dataset[idx + i]
-            batchx.append(x)
-            batchy.append(y)
-            batchz.append(z)
-        device = self.device
-        return torch.Tensor(numpy.array(batchx)).to(device), torch.Tensor(numpy.array(batchy)).to(device), torch.Tensor(numpy.array(batchz)).to(device)
-    def generator(self):
-        for i in range(self.n):
-            yield self[i]
-
-class DaskingDataset():
-    """
-        The images are crops saved as zarr files. The meshes are a
-    binary file.
-
-
-    """
-    def __init__(self, img_paths, mask_paths):
-        print(len(img_paths), "images", len(mask_paths), "masks")
-        self.masks = []
-        self.images = []
-        for img_path, mask_path in zip(img_paths, mask_paths):
-            img_ms = ngff_zarr.from_ngff_zarr(img_path)
-            img = img_ms.images[0].data
-
-            msk_ms = ngff_zarr.from_ngff_zarr(mask_path)
-            msk = msk_ms.images[0].data
-            self.masks.append(msk)
-            self.images.append(img)
-        self.images = da.concatenate(self.images, axis=0)[0:500]
-        self.masks = da.concatenate(self.masks, axis=0)[0:500]
-        self.n = self.images.shape[0]
-    def __len__(self):
-        return self.n
-    def __getitem__(self, idx):
-        x = numpy.array(self.images[idx], dtype="float32")
-        y, z = getDt( self.masks[idx] )
-        return x, y, z
-    def setLimit(self, limit):
-        self.n = limit
-
-
-
-
-def daskEvaluateModel(config):
-    device = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
-    #device = "cpu"
-    print(f"Using {device} device")
-
-    model = ImageToDistanceTransform( config["filters"], config["depth"])
-    if os.path.exists( config["model"] ):
-        model.load_state_dict(torch.load(config["model"], weights_only=True), strict=False)
-    else:
-        print("cannot find existing model: ", config["model"])
-    #dataset = ImageDtDataset( config["images"], config["masks"] )
-    dataset = DaskingDataset( config["images"], config["masks"] )
-    total = len(dataset)
-    loader = DataLoader(dataset, batch_size=1, shuffle = False, num_workers = 4, prefetch_factor = 8)
-    #loader = CustomLoader(dataset, device).generator()
-
-    logname = config["model"].replace(".pth", "")
-    loss_fn = PairedLossFunction()
-    model.to(device)
-    model.eval()
-    load_time = 0
-    proc_time = 0
-    loss_time = 0
-
-    time_start = time.time()
-
-    img = dataset.images
-
-    bs = 32
-    n = img.shape[0]
-    last = n%bs
-    head = (1, )*(n//bs)
-
-    def torchit( block_id, model=model, dataset = dataset ):
-        idx = block_id[0]
-        low = idx*bs
-        high = low + bs
-        elements = bs
-        if high > dataset.images.shape[0]:
-            high = dataset.images.shape[0]
-            elements = high - low
-
-        x = torch.tensor( numpy.array(dataset.images[low:high], dtype="float32") , device=device )
-
-        y, z = model(x)
-
-        y = y.detach().cpu()
-        z = z.detach().cpu()
-
-        t = [ getDt(dataset.masks[low + i]) for i in range(elements) ]
-        dt = torch.tensor( numpy.array([i[0] for i in t ]) )
-        matrix = torch.tensor( numpy.array([i[1] for i in t]) )
-
-        l0, l1 = loss_fn(y, dt, z, matrix)
-        ret = numpy.array([ [l0.numpy(), l1.numpy()]] )
-        return ret
-
-    sample = img[0]
-    print("preparing")
-
-    if last == 0:
-        chunks = ( (*head, ), 2 )
-    else:
-        chunks = ((*head, 1), 2)
-
-    out = dask.array.map_blocks( torchit, dtype="float32", chunks = chunks )
-    #out.compute_chunk_sizes()
-    print("processing")
-    tstart = time.time()
-    out = out.compute(num_workers = 3)
-    for err in out:
-        start = time.time()
-        val = err
-        print( (time.time() - start), "batch complete" )
-    print((time.time() - tstart), "completed")
 
 def evaluateModel(config):
     device = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
@@ -401,10 +318,17 @@ def evaluateModel(config):
         model.load_state_dict(torch.load(config["model"], weights_only=True), strict=False)
     else:
         print("cannot find existing model: ", config["model"])
-    #dataset = ImageDtDataset( config["images"], config["masks"] )
     dataset = DaskingDataset( config["images"], config["masks"] )
     total = len(dataset)
-    loader = DataLoader(dataset, batch_size=1, shuffle = False, num_workers = 4, prefetch_factor = 8)
+
+    batch_size = 1
+    use_torch_dataloader = True
+
+    if use_torch_dataloader:
+        loader = DataLoader(dataset, batch_size=1, shuffle = False, num_workers = 4, prefetch_factor = 8)
+        loader = DeviceLoader(loader, device)
+    else:
+        loader = QueueLoader(dataset, 1, device, parallel=6)
 
     logname = config["model"].replace(".pth", "")
     loss_fn = PairedLossFunction()
@@ -425,7 +349,6 @@ def evaluateModel(config):
                 proc_time = 0
                 loss_time = 0
             vol = torch.sum( ( y > 0 ) * 1.0 ).item()
-            X = X.to(device)
 
             load_time += time.time() - time_start
 
@@ -433,14 +356,11 @@ def evaluateModel(config):
             pred, matrix = model(X)
             proc_time += time.time() - time_start
             time_start = time.time()
-            pred = pred.cpu()
-            matrix = matrix.cpu()
             loss, loss2 = loss_fn(pred, y, matrix, z)
             loss_time += time.time() - time_start
 
             time_start = time.time()
             recording.write("%s\t%s\t%s\t%s\n"%(batch, loss.item(), loss2.item(), vol))
-            # Backpropagation
     print("total: ", (time.time() - first_start))
 
 def predictDt( config, img_path ):
@@ -535,6 +455,7 @@ if __name__=="__main__":
             for item in sys.exc_info():
                 print(item)
     elif sys.argv[1] == 'e':
-        evaluateModel(config)
-        #daskEvaluateModel(config)
+        with torch.no_grad():
+            evaluateModel(config)
+            #daskEvaluateModel(config)
 
