@@ -267,9 +267,9 @@ def trainModel( config ):
     logname = config["model"].replace(".pth", "")
     optimizer = torch.optim.Adam(model.parameters(), lr = 0.00001)
 
-    use_torch_dataload = True
-
+    use_torch_dataload = "PYTORCH_DATALOADER" in os.environ
     if use_torch_dataload:
+        print("using pytorch dataloader")
         pin_memory = device != "mps"
         loader = DataLoader(dataset, batch_size=config["batch_size"],num_workers = 4, prefetch_factor=8, pin_memory=pin_memory)
         loader = DeviceLoader(loader, device)
@@ -277,6 +277,7 @@ def trainModel( config ):
         loader = QueueLoader(dataset, config["batch_size"], device)
     for i in range(1000):
         start = time.time();
+        dataset.shuffle()
         l = epoch(loader, model, loss_fn, optimizer)
         print("trained: ", (time.time() - start))
         with open("log-%s.txt"%logname, 'a') as logit:
