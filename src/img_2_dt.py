@@ -86,13 +86,15 @@ class ImageToDistanceTransform(nn.Module):
 
 def getDt(img):
     msk = numpy.array(img, dtype="float32")
-    it = skimage.measure.inertia_tensor( msk[0] )
-    eig = numpy.linalg.eig( it )
-
-    values = [ (e, *v) for e, v in zip(eig.eigenvalues, eig.eigenvectors) ]
-    values.sort()
-    evs = numpy.array([ev[1:] for  ev in values], dtype="float32" )
-    evs = evs.reshape((9, ))
+    try:
+        it = skimage.measure.inertia_tensor( msk[0] )
+        eig = numpy.linalg.eig( it )
+        values = [ (e, *v) for e, v in zip(eig.eigenvalues, eig.eigenvectors) ]
+        values.sort()
+        evs = numpy.array([ev[1:] for  ev in values], dtype="float32" )
+        evs = evs.reshape((9, ))
+    except:
+        evs = numpy.zeros((9, ))
     return ( numpy.array(scipy.ndimage.distance_transform_edt( msk ), dtype="float32"), evs )
 
 
