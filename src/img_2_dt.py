@@ -121,7 +121,6 @@ class QueueLoader:
             elements = high - low
 
         images = self.dataset[low:high]
-
         x = torch.tensor( images[0], device = self.device )
         dt = torch.tensor( images[1], device = self.device )
         matrix = torch.tensor( images[2], device = self.device )
@@ -294,20 +293,12 @@ def evaluateModel(config):
     print(f"Using {device} device")
     model = ImageToDistanceTransform( config["filters"], config["depth"])
     if os.path.exists( config["model"] ):
-        model.load_state_dict(torch.load(config["model"], weights_only=True), strict=False)
+        model.load_state_dict(torch.load(config["model"], weights_only=True, map_location=device), strict=False)
     else:
         print("cannot find existing model: ", config["model"])
 
 
-    dataset = DaskingDataset( config["images"], config["masks"] )
-    total = len(dataset)
     batch_size = 1
-    use_torch_dataloader = False
-    if use_torch_dataloader:
-        loader = DataLoader(dataset, batch_size=1, shuffle = False, num_workers = 4, prefetch_factor = 8)
-        loader = DeviceLoader(loader, device)
-    else:
-        loader = QueueLoader(dataset, 1, device, parallel=6)
 
     logname = config["model"].replace(".pth", "")
     loss_fn = PairedLossFunction()
@@ -319,27 +310,60 @@ def evaluateModel(config):
 
     time_start = time.time()
     first_start = time.time()
+    use_torch_dataloader = False
+
+    average_values = []
     with open("error-%s.txt"%logname, 'w') as recording:
-        for batch, (X, y, z) in enumerate(loader):
-            if batch%100 == 0:
-                print(batch, "of", total, " load: ", load_time, "pred:", proc_time, "loss:", loss_time)
-                recording.flush()
-                load_time = 0
-                proc_time = 0
-                loss_time = 0
-            vol = torch.sum( ( y > 0 ) * 1.0 ).item()
 
-            load_time += time.time() - time_start
+        samples = 0
+        for pair in zip(config["images"], config["masks"]):
+            print("pair", pair)
+            dataset = DaskingDataset([pair[0]], [pair[1]])
+            if use_torch_dataloader:
 
-            time_start = time.time()
-            pred, matrix = model(X)
-            proc_time += time.time() - time_start
-            time_start = time.time()
-            loss, loss2 = loss_fn(pred, y, matrix, z)
-            loss_time += time.time() - time_start
+                loader = DataLoader( dataset, batch_size=1, shuffle = False, num_workers = 4, prefetch_factor = 8)
+                loader = DeviceLoader(loader, device)
+            else:
+                loader = QueueLoader(dataset, 1, device, parallel=6)
+            cum_loss = numpy.zeros((2, ))
+            cum_loss_2 = numpy.zeros((2, ))
+            n = 0
+            for batch,data in enumerate(loader):
+                X, y, z = data
+                vol = torch.sum( 1.0*(y>0) )
+                if vol < 10:
+                    continue
+                samples += 1
+                if samples%100 == 0:
+                    print(samples, " load: ", load_time, "pred:", proc_time, "loss:", loss_time)
+                    recording.flush()
+                    load_time = 0
+                    proc_time = 0
+                    loss_time = 0
+                    break
 
-            time_start = time.time()
-            recording.write("%s\t%s\t%s\t%s\n"%(batch, loss.item(), loss2.item(), vol))
+                load_time += time.time() - time_start
+
+                time_start = time.time()
+                pred, matrix = model(X)
+                proc_time += time.time() - time_start
+                time_start = time.time()
+                loss, loss2 = loss_fn(pred, y, matrix, z)
+                loss_time += time.time() - time_start
+                cum_loss[0] += loss.item()
+                cum_loss[1] += loss2.item()
+                cum_loss_2[0] += loss.item()*loss.item()
+                cum_loss_2[1] += loss2.item()*loss2.item()
+                time_start = time.time()
+                recording.write("%s\t%s\t%s\n"%(batch, loss.item(), loss2.item()))
+                n += 1
+            cum_loss = cum_loss/n
+            var = cum_loss_2/n - cum_loss*cum_loss
+            average_values.append( ( pair[0], cum_loss[0], var[0], cum_loss[1], var[1], n ) )
+    with open("ave_%s.txt"%logname, 'w') as lo:
+        for line in average_values:
+            sline = "\t".join( "%s"%item for item in line )
+            lo.write("%s\n"%sline)
     print("total: ", (time.time() - first_start))
 
 def predictDt( config, img_path ):
