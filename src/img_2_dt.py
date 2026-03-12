@@ -190,7 +190,10 @@ class DaskingDataset():
     def shuffle(self):
         random.shuffle(self.indexes)
     def setLimit(self, limit):
-        self.n = limit
+        if limit > len(self.indexes):
+            print("warning: limit is not set, too large for dataset.", limit, " is more than ", self.n)
+        else:
+            self.n = limit
 
 def epoch(dataset, model, loss_fn, optimizer):
     out = numpy.zeros((3, ), dtype=float)
