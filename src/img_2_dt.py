@@ -254,7 +254,7 @@ def trainModel( config ):
     print(f"Using {device} device")
     model = ImageToDistanceTransform( config["filters"], config["depth"])
     if os.path.exists( config["model"] ):
-        model.load_state_dict(torch.load(config["model"], weights_only=True), strict=False)
+        model.load_state_dict(torch.load(config["model"], weights_only=True, map_location=device), strict=False)
 
 
 
